@@ -31,46 +31,69 @@ USER_SESSIONS = {}
 
 
 def parse_moxie_response(res_data):
-    """Extracts response text and suggested_options from Moxie's response JSON."""
+    """Extracts response text, suggested options, and routine product details from Moxie's JSON."""
     reply_text = ""
     suggested_options = []
+    routine_data = None
 
     if isinstance(res_data, dict):
-        # Check all possible keys Moxie uses across /chat and /photo/analyze
         reply_text = (
-            res_data.get("analysis") or 
             res_data.get("response") or 
             res_data.get("message") or 
-            res_data.get("text") or 
-            res_data.get("result") or 
+            res_data.get("analysis") or 
             ""
         )
         suggested_options = res_data.get("suggested_options") or []
+        routine_data = res_data.get("routine")
         
-        # Fallback: If no known text key matched, check if there's any value string
-        if not reply_text and res_data:
-            print(f"Unrecognized dictionary keys from Moxie: {res_data.keys()}")
-            # If there is only one string value in the dict, use it
-            for val in res_data.values():
-                if isinstance(val, str) and len(val) > 10:
-                    reply_text = val
-                    break
-
     elif isinstance(res_data, str):
         reply_text = res_data.strip().strip('"')
 
-    # Guaranteed fallback if reply_text is still empty
-    if not reply_text:
-        reply_text = "Analysis complete! I see your hair photo, but couldn't parse the detailed breakdown. How can I help you style it?"
+    return reply_text, suggested_options, routine_data
 
-    return reply_text, suggested_options
+
+def format_routine_response(reply_text: str, routine_data: dict) -> str:
+    """Formats the routine steps, product links, and total price into a clean WhatsApp recommendation message."""
+    if not routine_data or not routine_data.get("steps"):
+        return reply_text
+
+    routine_title = routine_data.get("routine", "Your Custom Hair Routine")
+    steps = routine_data.get("steps", [])
+
+    formatted_msg = f"{reply_text}\n\n"
+    formatted_msg += f"✨ *RECOMMENDED ROUTINE: {routine_title.upper()}* ✨\n"
+    formatted_msg += "───────────────\n"
+
+    cart_items = []
+
+    for step in steps:
+        step_num = step.get("step")
+        name = step.get("name")
+        price = step.get("price")
+        why = step.get("why")
+        url = step.get("url")
+        
+        formatted_msg += f"*{step_num}. {name}* ({price})\n"
+        formatted_msg += f"💡 _{why}_\n"
+        if url:
+            formatted_msg += f"🔗 Details: {url}\n"
+        formatted_msg += "\n"
+
+    formatted_msg += "───────────────\n"
+    
+    # 🛒 Build 1-Click Buy Link
+    # Moxie main bundle checkout fallback
+    formatted_msg += "🛒 *Ready to transform your hair?*\n"
+    formatted_msg += "Tap here to view bundle & add to cart:\n"
+    formatted_msg += "👉 https://moxiebeauty.in/collections/all\n"
+
+    return formatted_msg
 
 
 def send_whatsapp_text(to_phone: str, body_text: str, options: list = None):
-    """Sends a clean, text-only message to WhatsApp with formatted suggested options."""
+    """Sends clean text response with formatted bullet options."""
     twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
 
-    # Ensure body_text is never empty
     final_text = body_text.strip() if body_text else "Here is your response from Moxie HairGPT:"
 
     # Append suggested options as bullet points if available
@@ -88,7 +111,7 @@ def send_whatsapp_text(to_phone: str, body_text: str, options: list = None):
 
 
 def call_moxie_photo_analyze(image_bytes: bytes, filename: str = "hair.jpg"):
-    """Uploads image bytes to Moxie's /photo/analyze endpoint."""
+    """Uploads photo to Moxie's /photo/analyze endpoint."""
     try:
         files = {"file": (filename, image_bytes, "image/jpeg")}
         response = requests.post(
@@ -103,17 +126,17 @@ def call_moxie_photo_analyze(image_bytes: bytes, filename: str = "hair.jpg"):
                 res_data = response.json()
                 return parse_moxie_response(res_data)
             except Exception:
-                return response.text.strip().strip('"'), []
+                return response.text.strip().strip('"'), [], None
         
-        return "I received your photo, but couldn't process it with Moxie HairGPT. Please try sending it again!", []
+        return "I received your photo, but couldn't analyze it right now. Please try again!", [], None
 
     except Exception as e:
         print(f"Error calling Moxie photo/analyze: {e}")
-        return "Sorry, there was an issue analyzing your photo.", []
+        return "Sorry, there was an issue analyzing your photo.", [], None
 
 
 def call_moxie_chat(user_message: str, session_data: dict):
-    """Forwards text message to Moxie's /chat endpoint."""
+    """Forwards query to Moxie's /chat endpoint."""
     headers = {**COMMON_HEADERS, "content-type": "application/json"}
 
     payload = {
@@ -135,25 +158,25 @@ def call_moxie_chat(user_message: str, session_data: dict):
         if response.status_code == 200:
             try:
                 res_data = response.json()
-                reply_text, suggested_options = parse_moxie_response(res_data)
+                reply_text, suggested_options, routine_data = parse_moxie_response(res_data)
             except Exception:
-                reply_text, suggested_options = response.text.strip().strip('"'), []
+                reply_text, suggested_options, routine_data = response.text.strip().strip('"'), [], None
 
-            # Save to conversation history
+            # Sync session history
             session_data["history"].append({"role": "user", "content": user_message})
             session_data["history"].append({"role": "assistant", "content": reply_text})
 
-            return reply_text, suggested_options
+            return reply_text, suggested_options, routine_data
         
-        return "I am having trouble connecting to Moxie's chat service right now.", []
+        return "I am having trouble connecting to Moxie's chat service right now.", [], None
 
     except Exception as e:
         print(f"Error calling Moxie chat: {e}")
-        return "Sorry, I couldn't process your message.", []
+        return "Sorry, I couldn't process your message.", [], None
 
 
 def process_whatsapp_payload(sender_phone: str, text: str, media_url: str):
-    """Handles incoming WhatsApp payloads with chained photo-to-chat flow."""
+    """Processes incoming messages, photo uploads, and routine recommendations."""
     if sender_phone not in USER_SESSIONS:
         USER_SESSIONS[sender_phone] = {
             "session_id": str(uuid.uuid4()),
@@ -162,31 +185,34 @@ def process_whatsapp_payload(sender_phone: str, text: str, media_url: str):
     
     session = USER_SESSIONS[sender_phone]
     options = []
+    routine_data = None
 
-    # CASE 1: USER SENT AN IMAGE (2-Step Chain to mirror Moxie Web UI)
+    # CASE 1: USER SENT AN IMAGE (2-step chain to get friendly chat response)
     if media_url:
         img_res = requests.get(media_url, auth=(TWILIO_SID, TWILIO_AUTH))
         if img_res.status_code == 200:
-            # Step 1: Extract raw vision analysis
-            raw_analysis, _ = call_moxie_photo_analyze(img_res.content)
+            raw_analysis, _, _ = call_moxie_photo_analyze(img_res.content)
             
-            # Step 2: Pass raw vision analysis into /chat so HairGPT talks naturally
             chat_prompt = (
                 f"[User uploaded a hair photo. Analysis: {raw_analysis}]\n\n"
                 "Please respond to this hair analysis naturally."
             )
-            bot_reply, options = call_moxie_chat(chat_prompt, session)
+            bot_reply, options, routine_data = call_moxie_chat(chat_prompt, session)
         else:
             bot_reply, options = "Could not download the image from WhatsApp. Please send it again!", []
 
     # CASE 2: USER SENT TEXT
     elif text:
-        bot_reply, options = call_moxie_chat(text, session)
+        bot_reply, options, routine_data = call_moxie_chat(text, session)
         
     else:
         bot_reply, options = "Please send a message or a photo of your hair to get started!", []
 
-    # Send natural conversational response back to WhatsApp
+    # Format text if routine products were returned in the payload
+    if routine_data:
+        bot_reply = format_routine_response(bot_reply, routine_data)
+
+    # Dispatch to WhatsApp
     send_whatsapp_text(sender_phone, bot_reply, options)
 
 
