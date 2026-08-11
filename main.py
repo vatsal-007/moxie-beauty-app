@@ -36,10 +36,32 @@ def parse_moxie_response(res_data):
     suggested_options = []
 
     if isinstance(res_data, dict):
-        reply_text = res_data.get("response") or res_data.get("message") or ""
+        # Check all possible keys Moxie uses across /chat and /photo/analyze
+        reply_text = (
+            res_data.get("analysis") or 
+            res_data.get("response") or 
+            res_data.get("message") or 
+            res_data.get("text") or 
+            res_data.get("result") or 
+            ""
+        )
         suggested_options = res_data.get("suggested_options") or []
+        
+        # Fallback: If no known text key matched, check if there's any value string
+        if not reply_text and res_data:
+            print(f"Unrecognized dictionary keys from Moxie: {res_data.keys()}")
+            # If there is only one string value in the dict, use it
+            for val in res_data.values():
+                if isinstance(val, str) and len(val) > 10:
+                    reply_text = val
+                    break
+
     elif isinstance(res_data, str):
         reply_text = res_data.strip().strip('"')
+
+    # Guaranteed fallback if reply_text is still empty
+    if not reply_text:
+        reply_text = "Analysis complete! I see your hair photo, but couldn't parse the detailed breakdown. How can I help you style it?"
 
     return reply_text, suggested_options
 
