@@ -10,7 +10,7 @@ load_dotenv()
 
 app = FastAPI()
 
-# Twilio Credentials
+# Credentials
 TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = "whatsapp:+14155238886"
@@ -26,12 +26,12 @@ COMMON_HEADERS = {
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 }
 
-# In-memory session store mapping phone numbers to HairGPT session IDs & history
+# In-memory session store mapping phone numbers to HairGPT sessions & history
 USER_SESSIONS = {}
 
 
 def parse_moxie_response(res_data):
-    """Extracts text response and suggested_options list from Moxie's response JSON."""
+    """Extracts response text and suggested_options from Moxie's response JSON."""
     reply_text = ""
     suggested_options = []
 
@@ -44,59 +44,31 @@ def parse_moxie_response(res_data):
     return reply_text, suggested_options
 
 
-def send_whatsapp_message_with_buttons(to_phone: str, body_text: str, options: list = None):
-    """Sends message with WhatsApp Quick Reply buttons via Twilio API."""
+def send_whatsapp_text(to_phone: str, body_text: str, options: list = None):
+    """Sends a clean, text-only message to WhatsApp with formatted suggested options."""
     twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
 
-    valid_buttons = []
+    # Ensure body_text is never empty
+    final_text = body_text.strip() if body_text else "Here is your response from Moxie HairGPT:"
+
+    # Append suggested options as bullet points if available
     if options and isinstance(options, list):
-        # WhatsApp limits interactive quick reply buttons to max 3 buttons, 20 chars each
-        for idx, option in enumerate(options[:3]):
-            clean_text = str(option)[:20]
-            valid_buttons.append({
-                "type": "reply",
-                "reply": {
-                    "id": f"btn_{idx}",
-                    "title": clean_text
-                }
-            })
+        final_text += "\n\n*Suggested options:*\n" + "\n".join([f"• {opt}" for opt in options])
 
-    if valid_buttons:
-        interactive_payload = {
-            "type": "button",
-            "body": {"text": body_text},
-            "action": {"buttons": valid_buttons}
-        }
-        
-        try:
-            twilio_client.messages.create(
-                from_=TWILIO_NUMBER,
-                to=to_phone,
-                persistent_action=[f"interactive:{json.dumps(interactive_payload)}"]
-            )
-            return
-        except Exception as e:
-            print(f"Interactive buttons fallback trigger: {e}")
-
-    # Fallback to standard text with bullet points if buttons fail or exceed limits
-    fallback_text = body_text
-    if options:
-        fallback_text += "\n\n*Suggested options:*\n" + "\n".join([f"• {opt}" for opt in options])
-
-    twilio_client.messages.create(
-        from_=TWILIO_NUMBER,
-        body=fallback_text,
-        to=to_phone
-    )
+    try:
+        twilio_client.messages.create(
+            from_=TWILIO_NUMBER,
+            body=final_text,
+            to=to_phone
+        )
+    except Exception as e:
+        print(f"Error sending WhatsApp message: {e}")
 
 
 def call_moxie_photo_analyze(image_bytes: bytes, filename: str = "hair.jpg"):
-    """Uploads photo to Moxie's /photo/analyze endpoint and returns (reply_text, suggested_options)."""
+    """Uploads image bytes to Moxie's /photo/analyze endpoint."""
     try:
-        files = {
-            "file": (filename, image_bytes, "image/jpeg")
-        }
-        
+        files = {"file": (filename, image_bytes, "image/jpeg")}
         response = requests.post(
             HAIRGPT_ANALYZE_URL,
             files=files,
@@ -111,15 +83,15 @@ def call_moxie_photo_analyze(image_bytes: bytes, filename: str = "hair.jpg"):
             except Exception:
                 return response.text.strip().strip('"'), []
         
-        return "I received your photo, but couldn't get a proper analysis from Moxie HairGPT. Please try uploading again!", []
+        return "I received your photo, but couldn't process it with Moxie HairGPT. Please try sending it again!", []
 
     except Exception as e:
         print(f"Error calling Moxie photo/analyze: {e}")
-        return "Sorry, there was an issue analyzing your photo right now.", []
+        return "Sorry, there was an issue analyzing your photo.", []
 
 
 def call_moxie_chat(user_message: str, session_data: dict):
-    """Forwards text message to Moxie's /chat endpoint and returns (reply_text, suggested_options)."""
+    """Forwards text message to Moxie's /chat endpoint."""
     headers = {**COMMON_HEADERS, "content-type": "application/json"}
 
     payload = {
@@ -145,7 +117,7 @@ def call_moxie_chat(user_message: str, session_data: dict):
             except Exception:
                 reply_text, suggested_options = response.text.strip().strip('"'), []
 
-            # Sync session history for multi-turn conversations
+            # Save to conversation history
             session_data["history"].append({"role": "user", "content": user_message})
             session_data["history"].append({"role": "assistant", "content": reply_text})
 
@@ -155,11 +127,11 @@ def call_moxie_chat(user_message: str, session_data: dict):
 
     except Exception as e:
         print(f"Error calling Moxie chat: {e}")
-        return "Sorry, I couldn't process your text message.", []
+        return "Sorry, I couldn't process your message.", []
 
 
 def process_whatsapp_payload(sender_phone: str, text: str, media_url: str):
-    """Background task processing text or photo payload and dispatching interactive responses."""
+    """Background task handling WhatsApp payloads."""
     if sender_phone not in USER_SESSIONS:
         USER_SESSIONS[sender_phone] = {
             "session_id": str(uuid.uuid4()),
@@ -177,15 +149,15 @@ def process_whatsapp_payload(sender_phone: str, text: str, media_url: str):
         else:
             bot_reply, options = "Could not download the image from WhatsApp. Please send it again!", []
 
-    # CASE 2: USER SENT TEXT OR TAPPED A BUTTON
+    # CASE 2: USER SENT TEXT
     elif text:
         bot_reply, options = call_moxie_chat(text, session)
         
     else:
         bot_reply, options = "Please send a message or a photo of your hair to get started!", []
 
-    # Dispatch back to WhatsApp with buttons / options
-    send_whatsapp_message_with_buttons(sender_phone, bot_reply, options)
+    # Dispatch plain text back to user
+    send_whatsapp_text(sender_phone, bot_reply, options)
 
 
 @app.post("/webhook")
