@@ -1,3 +1,10 @@
 streamlit
 google-genai
 pillow
+fastapi
+uvicorn
+twilio
+python-multipart
+google-genai
+requests
+python-dotenv
