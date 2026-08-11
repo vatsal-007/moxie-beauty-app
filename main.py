@@ -74,7 +74,10 @@ def process_twilio_image(sender_phone: str, media_url: str, ngrok_url: str):
             
             # 🌟 NEW: Format the local image path into a public Ngrok URL for Twilio
             if matched_bundle.get("images"):
-                filename = os.path.basename(matched_bundle["images"][0])
+                # Convert Windows backslashes to Linux forward slashes
+                raw_image_path = matched_bundle["images"][0].replace("\\", "/")
+                filename = os.path.basename(raw_image_path)
+                
                 safe_filename = urllib.parse.quote(filename)
                 product_image_url = f"{ngrok_url}/assets/{safe_filename}"
 
