@@ -198,10 +198,25 @@ def load_catalog():
 
 @st.cache_data
 def load_pil_image(image_path):
-    if os.path.exists(image_path):
-        return Image.open(image_path)
+    if not image_path:
+        return None
+        
+    # 1. Convert Windows backslashes to Linux forward slashes
+    clean_path = image_path.replace("\\", "/").lstrip("/")
+    
+    # 2. Check exact path (e.g., wavy_curly_assets/Curly_Vibe_Setter_Duo_Cream__Gel_1.jpg)
+    if os.path.exists(clean_path):
+        return Image.open(clean_path)
+    
+    # 3. Fallback: Search inside both 'wavy_curly_assets' and 'images' folders
+    filename = os.path.basename(clean_path)
+    for folder in ["wavy_curly_assets", "images", "."]:
+        fallback_path = os.path.join(folder, filename)
+        if os.path.exists(fallback_path):
+            return Image.open(fallback_path)
+            
     return None
-
+    
 CATALOG = load_catalog()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
