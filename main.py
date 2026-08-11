@@ -153,7 +153,7 @@ def call_moxie_chat(user_message: str, session_data: dict):
 
 
 def process_whatsapp_payload(sender_phone: str, text: str, media_url: str):
-    """Background task handling WhatsApp payloads."""
+    """Handles incoming WhatsApp payloads with chained photo-to-chat flow."""
     if sender_phone not in USER_SESSIONS:
         USER_SESSIONS[sender_phone] = {
             "session_id": str(uuid.uuid4()),
@@ -163,11 +163,19 @@ def process_whatsapp_payload(sender_phone: str, text: str, media_url: str):
     session = USER_SESSIONS[sender_phone]
     options = []
 
-    # CASE 1: USER SENT AN IMAGE
+    # CASE 1: USER SENT AN IMAGE (2-Step Chain to mirror Moxie Web UI)
     if media_url:
         img_res = requests.get(media_url, auth=(TWILIO_SID, TWILIO_AUTH))
         if img_res.status_code == 200:
-            bot_reply, options = call_moxie_photo_analyze(img_res.content)
+            # Step 1: Extract raw vision analysis
+            raw_analysis, _ = call_moxie_photo_analyze(img_res.content)
+            
+            # Step 2: Pass raw vision analysis into /chat so HairGPT talks naturally
+            chat_prompt = (
+                f"[User uploaded a hair photo. Analysis: {raw_analysis}]\n\n"
+                "Please respond to this hair analysis naturally."
+            )
+            bot_reply, options = call_moxie_chat(chat_prompt, session)
         else:
             bot_reply, options = "Could not download the image from WhatsApp. Please send it again!", []
 
@@ -178,7 +186,7 @@ def process_whatsapp_payload(sender_phone: str, text: str, media_url: str):
     else:
         bot_reply, options = "Please send a message or a photo of your hair to get started!", []
 
-    # Dispatch plain text back to user
+    # Send natural conversational response back to WhatsApp
     send_whatsapp_text(sender_phone, bot_reply, options)
 
 
