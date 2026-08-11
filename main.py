@@ -53,42 +53,36 @@ def parse_moxie_response(res_data):
 
 
 def format_routine_response(reply_text: str, routine_data: dict) -> str:
-    """Formats the routine steps, product links, and total price into a clean WhatsApp recommendation message."""
+    """Formats the routine steps concisely to stay under Twilio's 1600 character limit."""
     if not routine_data or not routine_data.get("steps"):
         return reply_text
 
     routine_title = routine_data.get("routine", "Your Custom Hair Routine")
     steps = routine_data.get("steps", [])
 
-    formatted_msg = f"{reply_text}\n\n"
+    # Keep the intro text concise
+    formatted_msg = f"{reply_text[:300]}...\n\n" if len(reply_text) > 300 else f"{reply_text}\n\n"
     formatted_msg += f"✨ *RECOMMENDED ROUTINE: {routine_title.upper()}* ✨\n"
     formatted_msg += "───────────────\n"
-
-    cart_items = []
 
     for step in steps:
         step_num = step.get("step")
         name = step.get("name")
         price = step.get("price")
-        why = step.get("why")
         url = step.get("url")
         
+        # Compact single-line per product
         formatted_msg += f"*{step_num}. {name}* ({price})\n"
-        formatted_msg += f"💡 _{why}_\n"
         if url:
-            formatted_msg += f"🔗 Details: {url}\n"
+            formatted_msg += f"👉 Link: {url}\n"
         formatted_msg += "\n"
 
     formatted_msg += "───────────────\n"
-    
-    # 🛒 Build 1-Click Buy Link
-    # Moxie main bundle checkout fallback
     formatted_msg += "🛒 *Ready to transform your hair?*\n"
-    formatted_msg += "Tap here to view bundle & add to cart:\n"
-    formatted_msg += "👉 https://moxiebeauty.in/collections/all\n"
+    formatted_msg += "View and add the full bundle to your cart here:\n"
+    formatted_msg += "https://moxiebeauty.in/collections/all"
 
     return formatted_msg
-
 
 def send_whatsapp_text(to_phone: str, body_text: str, options: list = None):
     """Sends clean text response with formatted bullet options."""
