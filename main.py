@@ -1,133 +1,104 @@
 import os
-import json
+import uuid
 import requests
-import urllib.parse
 from fastapi import FastAPI, Form, BackgroundTasks, Request
-from fastapi.staticfiles import StaticFiles
 from twilio.rest import Client
-from google import genai
-from google.genai import types
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 app = FastAPI()
 
-# 🌟 NEW: Expose your local assets folder to the web so Twilio can download the images
-app.mount("/assets", StaticFiles(directory="wavy_curly_assets"), name="assets")
-
-# Credentials
 TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = "whatsapp:+14155238886"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+HAIRGPT_URL = "https://hairgpt-preview-586722022195.asia-south1.run.app/chat"
 
-# Load your local catalog
-try:
-    with open("wavy_curly_catalog.json", "r", encoding="utf-8") as f:
-        CATALOG = json.load(f)
-except FileNotFoundError:
-    CATALOG = []
+# In-memory session store mapping phone numbers to HairGPT sessions & conversation history
+# Structure: { "+123456": {"session_id": "...", "history": []} }
+USER_SESSIONS = {}
 
-def process_twilio_image(sender_phone: str, media_url: str, ngrok_url: str):
-    """Background task to fetch image, run AI, and reply via Twilio."""
+def call_hairgpt_api(user_message: str, session_data: dict) -> str:
+    """Payload forwarder to Moxie's actual HairGPT endpoint."""
+    headers = {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "origin": "https://moxiebeauty.in",
+        "referer": "https://moxiebeauty.in/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+    }
+
+    payload = {
+        "message": user_message,
+        "session_id": session_data["session_id"],
+        "history": session_data["history"],
+        "device_info": {
+            "userAgent": headers["user-agent"],
+            "platform": "Win32",
+            "language": "en-US",
+            "isMobile": True
+        },
+        "ga_context": {}
+    }
+
     try:
-        # 1. Download image from Twilio
-        image_response = requests.get(media_url, auth=(TWILIO_SID, TWILIO_AUTH))
-        if image_response.status_code != 200:
-            print(f"Error downloading image: {image_response.text}")
-            return
-        image_bytes = image_response.content
+        response = requests.post(HAIRGPT_URL, json=payload, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            # Handle both JSON string response or dict response
+            try:
+                res_data = response.json()
+                # Extract text if returned inside an object or as plain text
+                reply_text = res_data.get("response") or res_data.get("message") or response.text
+            except Exception:
+                reply_text = response.text
 
-        # 2. Run Gemini AI
-        prompt = """
-        Analyze the hair texture in this photo for Moxie Beauty.
-        Return ONLY a JSON object with:
-        - "archetype": "WAVY_VIBE_SETTER" or "CURLY_VIBE_SETTER"
-        - "classification": e.g., "Type 2B Wavy"
-        - "reasoning": 1-sentence analysis of texture.
-        """
-        
-        response = gemini_client.models.generate_content(
-            model="gemini-3.1-flash-lite",
-            contents=[types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt],
-            config={"response_mime_type": "application/json"}
-        )
-        
-        ai_data = json.loads(response.text.strip())
-        
-        # 3. Match Archetype & Extract Image URL
-        target_handle = "wavy-vibe-setter-duo" if ai_data.get("archetype") == "WAVY_VIBE_SETTER" else "curly-vibe-setter-duo"
-        matched_bundle = next((p for p in CATALOG if p.get("handle") == target_handle), None)
-        
-        cart_url = f"https://moxiebeauty.in/products/{target_handle}"
-        product_image_url = None
+            # Clean up raw quotes if returned as a JSON string
+            reply_text = reply_text.strip().strip('"')
 
-        if matched_bundle:
-            # Build the Cart Link
-            if matched_bundle.get("variants"):
-                variant_id = matched_bundle["variants"][0]["id"]
-                cart_url = f"https://moxiebeauty.in/cart/{variant_id}:1?discount=MOXIEAI10"
-            
-            # 🌟 NEW: Format the local image path into a public Ngrok URL for Twilio
-            if matched_bundle.get("images"):
-                # Convert Windows backslashes to Linux forward slashes
-                raw_image_path = matched_bundle["images"][0].replace("\\", "/")
-                filename = os.path.basename(raw_image_path)
-                
-                safe_filename = urllib.parse.quote(filename)
-                product_image_url = f"{ngrok_url}/assets/{safe_filename}"
+            # Update conversation history for the next turn
+            session_data["history"].append({"role": "user", "content": user_message})
+            session_data["history"].append({"role": "assistant", "content": reply_text})
 
-        # 4. Format Message
-        reply_text = (
-            f"✨ *Moxie Hair Diagnosis*\n\n"
-            f"*{ai_data.get('classification')}*\n"
-            f"{ai_data.get('reasoning')}\n\n"
-            f"🛍️ *Your Custom Routine:*\n"
-            f"🛒 Tap here to buy with 10% off: {cart_url}"
-        )
-
-        # 5. Send Reply via Twilio
-        client = Client(TWILIO_SID, TWILIO_AUTH)
-        
-        msg_params = {
-            "from_": TWILIO_NUMBER,
-            "body": reply_text,
-            "to": sender_phone
-        }
-        
-        # 🌟 NEW: Attach the image if we successfully constructed the URL
-        if product_image_url:
-            msg_params["media_url"] = [product_image_url]
-
-        client.messages.create(**msg_params)
+            return reply_text
+        else:
+            print(f"HairGPT API Error ({response.status_code}): {response.text}")
+            return "I'm having a bit of trouble connecting to Moxie HairGPT right now. Please try again!"
 
     except Exception as e:
-        print(f"Error in background task: {e}")
+        print(f"Exception calling HairGPT API: {e}")
+        return "Sorry, I couldn't process that request right now."
+
+def process_whatsapp_chat(sender_phone: str, user_text: str):
+    """Background task to bridge WhatsApp and HairGPT."""
+    # Initialize session if first time messaging
+    if sender_phone not in USER_SESSIONS:
+        USER_SESSIONS[sender_phone] = {
+            "session_id": str(uuid.uuid4()),
+            "history": []
+        }
+
+    session = USER_SESSIONS[sender_phone]
+    
+    # Get response from Moxie HairGPT API
+    bot_reply = call_hairgpt_api(user_text, session)
+
+    # Dispatch back to WhatsApp
+    twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
+    twilio_client.messages.create(
+        from_=TWILIO_NUMBER,
+        body=bot_reply,
+        to=sender_phone
+    )
 
 @app.post("/webhook")
 async def twilio_webhook(
-    request: Request,
     background_tasks: BackgroundTasks,
     From: str = Form(...),
-    NumMedia: int = Form(0),
-    MediaUrl0: str = Form(None)
+    Body: str = Form(None)
 ):
-    # 🌟 NEW: Automatically capture your active Ngrok URL so it never breaks when you restart Ngrok
-    host = request.headers.get("host")
-    ngrok_url = f"https://{host}"
+    if Body:
+        background_tasks.add_task(process_whatsapp_chat, From, Body)
 
-    if NumMedia > 0 and MediaUrl0:
-        background_tasks.add_task(process_twilio_image, From, MediaUrl0, ngrok_url)
-    else:
-        client = Client(TWILIO_SID, TWILIO_AUTH)
-        client.messages.create(
-            from_=TWILIO_NUMBER,
-            body="Please upload a photo of your hair so our AI can analyze your texture! ✨",
-            to=From
-        )
-        
     return "OK"
